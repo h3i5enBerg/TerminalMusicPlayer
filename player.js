@@ -8,9 +8,13 @@
  * Architecture: Single-file player (player.js)
  */
 
+import { spawn } from 'node:child_process';
+import net from 'node:net';
+import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import { EventEmitter } from 'node:events';
 
 // Supported audio file extensions
 const SUPPORTED_EXTENSIONS = new Set([
@@ -190,13 +194,291 @@ function printPlaylistSummary(targetPath, isDirectory, playlist) {
 }
 
 /**
- * Main entry point for Step 2 execution.
+ * MPV Audio Controller via IPC Socket
  */
-function main() {
+class MPVAudioEngine extends EventEmitter {
+  constructor() {
+    super();
+    this.socketPath = path.join(os.tmpdir(), `mpv-player-${process.pid}.sock`);
+    this.process = null;
+    this.socket = null;
+    this.connected = false;
+    this.buffer = '';
+    this.requestId = 1;
+    this.isQuitting = false;
+
+    // Playback state cache
+    this.state = {
+      paused: false,
+      timePos: 0,
+      duration: 0,
+      volume: 100,
+      filename: ''
+    };
+  }
+
+  /**
+   * Spawns mpv in headless background mode with IPC socket.
+   */
+  async start() {
+    // Remove stale socket file if it exists
+    if (fs.existsSync(this.socketPath)) {
+      try {
+        fs.unlinkSync(this.socketPath);
+      } catch {}
+    }
+
+    const mpvArgs = [
+      `--input-ipc-server=${this.socketPath}`,
+      '--idle=yes',
+      '--no-video',
+      '--audio-display=no',
+      '--msg-level=all=no'
+    ];
+
+    this.process = spawn('mpv', mpvArgs, {
+      stdio: ['ignore', 'ignore', 'ignore']
+    });
+
+    this.process.on('error', (err) => {
+      console.error(`${style.red}${style.bold}Error:${style.reset} Failed to spawn mpv process: ${err.message}`);
+      console.error(`${style.gray}Ensure mpv is installed (e.g. 'brew install mpv').${style.reset}`);
+      process.exit(1);
+    });
+
+    this.process.on('exit', () => {
+      if (!this.isQuitting) {
+        this.cleanup();
+      }
+    });
+
+    // Wait for the IPC socket to become available and connect
+    await this.connectSocket();
+    this.setupPropertyObservers();
+  }
+
+  /**
+   * Connects to the mpv UNIX domain socket with retry logic.
+   */
+  async connectSocket(maxRetries = 40, delayMs = 50) {
+    for (let i = 0; i < maxRetries; i++) {
+      if (fs.existsSync(this.socketPath)) {
+        try {
+          await new Promise((resolve, reject) => {
+            const socket = net.createConnection(this.socketPath, () => {
+              this.socket = socket;
+              this.connected = true;
+              this.setupSocketListeners();
+              resolve();
+            });
+
+            socket.on('error', (err) => {
+              reject(err);
+            });
+          });
+
+          return;
+        } catch {
+          // Socket might be created on filesystem but not accepting connections yet
+        }
+      }
+
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+
+    throw new Error('Failed to connect to mpv IPC socket within timeout.');
+  }
+
+  /**
+   * Listens for and parses JSON-RPC events from the mpv socket stream.
+   */
+  setupSocketListeners() {
+    this.socket.on('data', (chunk) => {
+      this.buffer += chunk.toString();
+      const lines = this.buffer.split('\n');
+      this.buffer = lines.pop(); // Retain incomplete chunk
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const msg = JSON.parse(line.trim());
+          this.handleIPCMessage(msg);
+        } catch {}
+      }
+    });
+
+    this.socket.on('close', () => {
+      this.connected = false;
+    });
+
+    this.socket.on('error', () => {});
+  }
+
+  /**
+   * Handles incoming IPC messages and property changes.
+   */
+  handleIPCMessage(msg) {
+    if (msg.event === 'property-change') {
+      const { name, data } = msg;
+
+      if (name === 'time-pos' && typeof data === 'number') {
+        this.state.timePos = data;
+        this.emit('time-pos', data);
+      } else if (name === 'pause' && typeof data === 'boolean') {
+        this.state.paused = data;
+        this.emit('pause', data);
+      } else if (name === 'duration' && typeof data === 'number') {
+        this.state.duration = data;
+        this.emit('duration', data);
+      } else if (name === 'volume' && typeof data === 'number') {
+        this.state.volume = data;
+        this.emit('volume', data);
+      } else if (name === 'filename' && typeof data === 'string') {
+        this.state.filename = data;
+        this.emit('filename', data);
+      }
+    } else if (msg.event === 'end-file') {
+      this.emit('end-file', msg);
+    }
+  }
+
+  /**
+   * Subscribes to mpv property changes via IPC.
+   */
+  setupPropertyObservers() {
+    this.observeProperty('time-pos');
+    this.observeProperty('pause');
+    this.observeProperty('duration');
+    this.observeProperty('volume');
+    this.observeProperty('filename');
+  }
+
+  /**
+   * Dispatches an IPC command to mpv.
+   */
+  command(cmd, args = []) {
+    if (!this.connected || !this.socket) return;
+    const req = {
+      command: [cmd, ...args],
+      request_id: this.requestId++
+    };
+    this.socket.write(JSON.stringify(req) + '\n');
+  }
+
+  observeProperty(name) {
+    this.command('observe_property', [this.requestId, name]);
+  }
+
+  loadFile(filePath) {
+    this.command('loadfile', [filePath, 'replace']);
+  }
+
+  togglePause() {
+    this.command('cycle', ['pause']);
+  }
+
+  pause() {
+    this.command('set_property', ['pause', true]);
+  }
+
+  resume() {
+    this.command('set_property', ['pause', false]);
+  }
+
+  seek(seconds, type = 'relative') {
+    this.command('seek', [seconds, type]);
+  }
+
+  setVolume(volume) {
+    const clamped = Math.max(0, Math.min(100, volume));
+    this.command('set_property', ['volume', clamped]);
+  }
+
+  adjustVolume(delta) {
+    const nextVolume = Math.max(0, Math.min(100, this.state.volume + delta));
+    this.setVolume(nextVolume);
+  }
+
+  /**
+   * Cleanly closes the socket and terminates mpv.
+   */
+  cleanup() {
+    if (this.isQuitting) return;
+    this.isQuitting = true;
+
+    try {
+      if (this.connected && this.socket) {
+        this.command('quit');
+        this.socket.end();
+        this.socket.destroy();
+      }
+    } catch {}
+
+    try {
+      if (this.process && !this.process.killed) {
+        this.process.kill('SIGTERM');
+      }
+    } catch {}
+
+    try {
+      if (fs.existsSync(this.socketPath)) {
+        fs.unlinkSync(this.socketPath);
+      }
+    } catch {}
+  }
+}
+
+/**
+ * Main entry point for execution.
+ */
+async function main() {
   const cliTarget = process.argv[2] || './music';
   const { targetPath, isDirectory, playlist } = buildPlaylist(cliTarget);
 
   printPlaylistSummary(targetPath, isDirectory, playlist);
+
+  // Initialize MPV IPC Audio Backend
+  const player = new MPVAudioEngine();
+  console.log(`${style.dim}Initializing mpv audio backend...${style.reset}`);
+  
+  try {
+    await player.start();
+    console.log(`${style.green}✔ mpv IPC Engine initialized successfully.${style.reset}`);
+    
+    // Graceful exit handlers
+    const shutdown = () => {
+      console.log(`\n${style.yellow}Shutting down audio player...${style.reset}`);
+      player.cleanup();
+      process.exit(0);
+    };
+
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+    process.on('exit', () => player.cleanup());
+
+    // Play first track as a smoke test
+    let currentIndex = 0;
+    const initialTrack = playlist[currentIndex];
+    console.log(`${style.cyan}▶ Now Playing:${style.reset} ${style.bold}${initialTrack.filename}${style.reset}\n`);
+    player.loadFile(initialTrack.fullPath);
+
+    player.on('duration', (dur) => {
+      console.log(`${style.dim}[mpv event] Duration detected:${style.reset} ${dur.toFixed(2)}s`);
+    });
+
+    player.on('end-file', () => {
+      currentIndex = (currentIndex + 1) % playlist.length;
+      const nextTrack = playlist[currentIndex];
+      console.log(`\n${style.cyan}▶ Next Track:${style.reset} ${style.bold}${nextTrack.filename}${style.reset}`);
+      player.loadFile(nextTrack.fullPath);
+    });
+
+  } catch (err) {
+    console.error(`${style.red}${style.bold}Error starting audio engine:${style.reset}`, err.message);
+    player.cleanup();
+    process.exit(1);
+  }
 }
 
 main();
+
