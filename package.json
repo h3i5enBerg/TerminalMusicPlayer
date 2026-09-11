@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "A lightweight, interactive terminal music player built with Node.js and mpv IPC.",
   "main": "player.js",
+  "type": "module",
   "scripts": {
     "start": "node player.js"
   },
