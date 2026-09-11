@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# IPC sockets and temporary files
+*.sock
+/tmp/
+*.tmp
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env

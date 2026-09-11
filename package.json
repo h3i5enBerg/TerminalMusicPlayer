@@ -1,0 +1,19 @@
+{
+  "name": "terminal-music-player",
+  "version": "1.0.0",
+  "description": "A lightweight, interactive terminal music player built with Node.js and mpv IPC.",
+  "main": "player.js",
+  "scripts": {
+    "start": "node player.js"
+  },
+  "keywords": [
+    "terminal",
+    "cli",
+    "music-player",
+    "audio",
+    "mpv",
+    "interactive-systems"
+  ],
+  "author": "Niraj Satam",
+  "license": "MIT"
+}
