@@ -56,6 +56,55 @@ function formatFileSize(bytes) {
 }
 
 /**
+ * Format seconds into MM:SS (or HH:MM:SS if >= 3600).
+ * @param {number} seconds
+ * @returns {string}
+ */
+function formatTime(seconds) {
+  if (!seconds || isNaN(seconds) || seconds < 0) return '00:00';
+  const totalSecs = Math.floor(seconds);
+  const hrs = Math.floor(totalSecs / 3600);
+  const mins = Math.floor((totalSecs % 3600) / 60);
+  const secs = totalSecs % 60;
+
+  const mm = String(mins).padStart(2, '0');
+  const ss = String(secs).padStart(2, '0');
+
+  if (hrs > 0) {
+    const hh = String(hrs).padStart(2, '0');
+    return `${hh}:${mm}:${ss}`;
+  }
+  return `${mm}:${ss}`;
+}
+
+/**
+ * Generates an ASCII playback progress bar HUD.
+ * @param {number} currentTime - Current playback position in seconds
+ * @param {number} totalDuration - Total track duration in seconds
+ * @param {number} barLength - Character width of progress bar (default 24)
+ * @returns {string} Formatted HUD string
+ */
+function renderProgressBar(currentTime, totalDuration, barLength = 24) {
+  if (!totalDuration || totalDuration <= 0) {
+    const emptyBar = '─'.repeat(barLength);
+    return `  ${style.gray}[${emptyBar}] --:-- / --:-- (0%)${style.reset}`;
+  }
+
+  const ratio = Math.min(1, Math.max(0, currentTime / totalDuration));
+  const filledCount = Math.round(ratio * barLength);
+  const emptyCount = barLength - filledCount;
+
+  const filledBar = '█'.repeat(filledCount);
+  const emptyBar = '░'.repeat(emptyCount);
+  const percent = Math.round(ratio * 100);
+
+  const curStr = formatTime(currentTime);
+  const durStr = formatTime(totalDuration);
+
+  return `  ${style.cyan}[${style.green}${filledBar}${style.gray}${emptyBar}${style.cyan}]${style.reset} ${style.bold}${curStr}${style.reset} / ${style.dim}${durStr}${style.reset} ${style.yellow}(${percent}%)${style.reset}`;
+}
+
+/**
  * Recursively scans a directory and collects all supported audio file paths.
  * @param {string} dirPath - Absolute directory path
  * @returns {string[]} List of absolute audio file paths
@@ -431,14 +480,25 @@ class MPVAudioEngine extends EventEmitter {
 }
 
 /**
- * Renders the interactive terminal playlist menu UI.
+ * Renders the interactive terminal playlist menu and HUD UI.
  * @param {object} state - Interactive player state
  */
 function renderUI(state) {
-  const { targetPath, isDirectory, playlist, selectedIndex, activePlayingIndex, isPaused, statusText } = state;
+  const {
+    targetPath,
+    isDirectory,
+    playlist,
+    selectedIndex,
+    activePlayingIndex,
+    isPaused,
+    statusText,
+    timePos = 0,
+    duration = 0,
+    volume = 100
+  } = state;
   const lines = [];
 
-  // Header banner
+  // 1. Header Banner
   lines.push(`\n${style.cyan}${style.bold}🎵 TERMINAL MUSIC PLAYER${style.reset}`);
   lines.push(`${style.gray}${'━'.repeat(66)}${style.reset}`);
   lines.push(
@@ -446,9 +506,16 @@ function renderUI(state) {
       isDirectory ? `${style.blue}[Directory]${style.reset}` : `${style.blue}[Single File]${style.reset}`
     }`
   );
-  lines.push(` ${style.bold}Total Tracks:${style.reset} ${style.green}${playlist.length}${style.reset}`);
+
+  const volBarFilled = Math.round((volume / 100) * 8);
+  const volBarEmpty = Math.max(0, 8 - volBarFilled);
+  const volIcon = volume === 0 ? '🔇' : (volume < 50 ? '🔉' : '🔊');
+  const volMeter = `${volIcon} ${volume}% ${style.gray}[${style.green}${'█'.repeat(volBarFilled)}${'░'.repeat(volBarEmpty)}${style.gray}]${style.reset}`;
+
+  lines.push(` ${style.bold}Tracks:${style.reset} ${style.green}${playlist.length}${style.reset}   |   ${style.bold}Volume:${style.reset} ${volMeter}`);
   lines.push(`${style.gray}${'━'.repeat(66)}${style.reset}\n`);
 
+  // 2. Playlist Menu View
   lines.push(`  ${style.bold}PLAYLIST MENU:${style.reset}`);
   lines.push(`  ${style.gray}${'─'.repeat(62)}${style.reset}`);
 
@@ -490,15 +557,23 @@ function renderUI(state) {
 
   lines.push(`  ${style.gray}${'─'.repeat(62)}${style.reset}\n`);
 
-  // Status message
+  // 3. Live Playback HUD & Progress Bar
+  const activeTrack = activePlayingIndex >= 0 ? playlist[activePlayingIndex] : null;
+  const trackTitle = activeTrack ? `${style.cyan}${style.bold}${activeTrack.filename}${style.reset}` : `${style.dim}Idle (Select track to play)${style.reset}`;
+  const hudBar = renderProgressBar(timePos, duration, 24);
+
+  lines.push(`  ${style.bold}Now Playing:${style.reset} ${trackTitle}`);
+  lines.push(`${hudBar}\n`);
+
+  // 4. Status / Toast message
   if (statusText) {
     lines.push(`  ${statusText}\n`);
   }
 
-  // Footer keybindings guide
+  // 5. Footer Keybindings Guide
   lines.push(`${style.gray}${'━'.repeat(66)}${style.reset}`);
   lines.push(
-    ` ${style.bold}Controls:${style.reset} [${style.cyan}↑/↓${style.reset}] Move  [${style.green}Space${style.reset}] Play/Pause  [${style.cyan}←/→${style.reset}] ±10s  [${style.magenta}n/p${style.reset}] Next/Prev  [${style.red}q${style.reset}] Quit`
+    ` ${style.bold}Controls:${style.reset} [${style.cyan}↑/↓${style.reset}] Move  [${style.green}Space${style.reset}] Play/Pause  [${style.cyan}←/→${style.reset}] ±10s  [${style.magenta}n/p${style.reset}] Next/Prev  [${style.yellow}+/-${style.reset}] Vol  [${style.red}q${style.reset}] Quit`
   );
   lines.push(`${style.gray}${'━'.repeat(66)}${style.reset}`);
 
@@ -521,13 +596,43 @@ async function main() {
     selectedIndex: 0,
     activePlayingIndex: -1,
     isPaused: false,
+    timePos: 0,
+    duration: 0,
+    volume: 100,
     statusText: `${style.dim}Use ↑/↓ or k/j to navigate, Space/Enter to play.${style.reset}`
   };
 
   const player = new MPVAudioEngine();
 
+  // Throttled UI rendering helper to avoid terminal flicker and CPU spikes
+  let lastRenderTime = 0;
+  let renderTimer = null;
+
+  const requestRender = (force = false) => {
+    const now = Date.now();
+    if (force || now - lastRenderTime >= 250) {
+      if (renderTimer) {
+        clearTimeout(renderTimer);
+        renderTimer = null;
+      }
+      lastRenderTime = now;
+      renderUI(state);
+    } else if (!renderTimer) {
+      renderTimer = setTimeout(() => {
+        renderTimer = null;
+        lastRenderTime = Date.now();
+        renderUI(state);
+      }, 250 - (now - lastRenderTime));
+    }
+  };
+
   // Graceful shutdown handler
   const shutdown = () => {
+    if (renderTimer) {
+      clearTimeout(renderTimer);
+      renderTimer = null;
+    }
+
     if (process.stdin.isTTY) {
       try {
         process.stdin.setRawMode(false);
@@ -556,10 +661,25 @@ async function main() {
     shutdown();
   }
 
-  // Listen to MPV state events to update UI
+  // Listen to MPV state events to update UI dynamically
+  player.on('time-pos', (time) => {
+    state.timePos = time;
+    requestRender(false);
+  });
+
+  player.on('duration', (dur) => {
+    state.duration = dur;
+    requestRender(true);
+  });
+
   player.on('pause', (paused) => {
     state.isPaused = paused;
-    renderUI(state);
+    requestRender(true);
+  });
+
+  player.on('volume', (vol) => {
+    state.volume = Math.round(vol);
+    requestRender(true);
   });
 
   player.on('end-file', () => {
@@ -567,10 +687,12 @@ async function main() {
     if (state.activePlayingIndex >= 0) {
       state.activePlayingIndex = (state.activePlayingIndex + 1) % playlist.length;
       state.selectedIndex = state.activePlayingIndex;
+      state.timePos = 0;
+      state.duration = 0;
       const nextTrack = playlist[state.activePlayingIndex];
       state.statusText = `${style.green}▶ Auto-playing next track:${style.reset} ${style.bold}${nextTrack.filename}${style.reset}`;
       player.loadFile(nextTrack.fullPath);
-      renderUI(state);
+      requestRender(true);
     }
   });
 
@@ -594,14 +716,14 @@ async function main() {
     // Navigate Up
     if ((key && key.name === 'up') || str === 'k') {
       state.selectedIndex = (state.selectedIndex - 1 + playlist.length) % playlist.length;
-      renderUI(state);
+      requestRender(true);
       return;
     }
 
     // Navigate Down
     if ((key && key.name === 'down') || str === 'j') {
       state.selectedIndex = (state.selectedIndex + 1) % playlist.length;
-      renderUI(state);
+      requestRender(true);
       return;
     }
 
@@ -609,10 +731,12 @@ async function main() {
     if (key && (key.name === 'return' || key.name === 'enter')) {
       state.activePlayingIndex = state.selectedIndex;
       state.isPaused = false;
+      state.timePos = 0;
+      state.duration = 0;
       const track = playlist[state.activePlayingIndex];
       state.statusText = `${style.green}▶ Now playing:${style.reset} ${style.bold}${track.filename}${style.reset}`;
       player.loadFile(track.fullPath);
-      renderUI(state);
+      requestRender(true);
       return;
     }
 
@@ -622,6 +746,8 @@ async function main() {
         // If nothing is playing yet, play the currently hovered item
         state.activePlayingIndex = state.selectedIndex;
         state.isPaused = false;
+        state.timePos = 0;
+        state.duration = 0;
         const track = playlist[state.activePlayingIndex];
         state.statusText = `${style.green}▶ Now playing:${style.reset} ${style.bold}${track.filename}${style.reset}`;
         player.loadFile(track.fullPath);
@@ -634,7 +760,7 @@ async function main() {
           ? `${style.yellow}⏸ Playback paused:${style.reset} ${style.dim}${track.filename}${style.reset}`
           : `${style.green}▶ Playback resumed:${style.reset} ${style.bold}${track.filename}${style.reset}`;
       }
-      renderUI(state);
+      requestRender(true);
       return;
     }
 
@@ -647,10 +773,12 @@ async function main() {
       }
       state.selectedIndex = state.activePlayingIndex;
       state.isPaused = false;
+      state.timePos = 0;
+      state.duration = 0;
       const track = playlist[state.activePlayingIndex];
       state.statusText = `${style.green}⏭ Next track:${style.reset} ${style.bold}${track.filename}${style.reset}`;
       player.loadFile(track.fullPath);
-      renderUI(state);
+      requestRender(true);
       return;
     }
 
@@ -659,6 +787,8 @@ async function main() {
       if (state.activePlayingIndex === -1) {
         state.activePlayingIndex = state.selectedIndex;
         state.isPaused = false;
+        state.timePos = 0;
+        state.duration = 0;
         const track = playlist[state.activePlayingIndex];
         state.statusText = `${style.green}▶ Now playing:${style.reset} ${style.bold}${track.filename}${style.reset}`;
         player.loadFile(track.fullPath);
@@ -674,12 +804,14 @@ async function main() {
           state.activePlayingIndex = (state.activePlayingIndex - 1 + playlist.length) % playlist.length;
           state.selectedIndex = state.activePlayingIndex;
           state.isPaused = false;
+          state.timePos = 0;
+          state.duration = 0;
           const track = playlist[state.activePlayingIndex];
           state.statusText = `${style.green}⏮ Previous track:${style.reset} ${style.bold}${track.filename}${style.reset}`;
           player.loadFile(track.fullPath);
         }
       }
-      renderUI(state);
+      requestRender(true);
       return;
     }
 
@@ -692,7 +824,7 @@ async function main() {
       } else {
         state.statusText = `${style.yellow}⚠ No track is currently playing to seek.${style.reset}`;
       }
-      renderUI(state);
+      requestRender(true);
       return;
     }
 
@@ -705,13 +837,33 @@ async function main() {
       } else {
         state.statusText = `${style.yellow}⚠ No track is currently playing to seek.${style.reset}`;
       }
-      renderUI(state);
+      requestRender(true);
+      return;
+    }
+
+    // Volume Up ('+' or '=')
+    if (str === '+' || str === '=') {
+      const newVol = Math.min(100, (state.volume || 100) + 5);
+      player.setVolume(newVol);
+      state.volume = newVol;
+      state.statusText = `${style.yellow}🔊 Volume: ${state.volume}%${style.reset}`;
+      requestRender(true);
+      return;
+    }
+
+    // Volume Down ('-' or '_')
+    if (str === '-' || str === '_') {
+      const newVol = Math.max(0, (state.volume || 100) - 5);
+      player.setVolume(newVol);
+      state.volume = newVol;
+      state.statusText = `${style.yellow}🔉 Volume: ${state.volume}%${style.reset}`;
+      requestRender(true);
       return;
     }
   });
 
   // Initial UI Render
-  renderUI(state);
+  requestRender(true);
 }
 
 main();
