@@ -14,6 +14,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import readline from 'node:readline';
 import { EventEmitter } from 'node:events';
 
 // Supported audio file extensions
@@ -31,6 +32,7 @@ const style = {
   reset: '\x1b[0m',
   bold: '\x1b[1m',
   dim: '\x1b[2m',
+  inverse: '\x1b[7m',
   cyan: '\x1b[36m',
   green: '\x1b[32m',
   yellow: '\x1b[33m',
@@ -429,56 +431,195 @@ class MPVAudioEngine extends EventEmitter {
 }
 
 /**
- * Main entry point for execution.
+ * Renders the interactive terminal playlist menu UI.
+ * @param {object} state - Interactive player state
+ */
+function renderUI(state) {
+  const { targetPath, isDirectory, playlist, selectedIndex, activePlayingIndex, isPaused, statusText } = state;
+  const lines = [];
+
+  // Header banner
+  lines.push(`\n${style.cyan}${style.bold}🎵 TERMINAL MUSIC PLAYER${style.reset}`);
+  lines.push(`${style.gray}${'━'.repeat(66)}${style.reset}`);
+  lines.push(
+    ` ${style.bold}Source:${style.reset} ${style.dim}${targetPath}${style.reset} ${
+      isDirectory ? `${style.blue}[Directory]${style.reset}` : `${style.blue}[Single File]${style.reset}`
+    }`
+  );
+  lines.push(` ${style.bold}Total Tracks:${style.reset} ${style.green}${playlist.length}${style.reset}`);
+  lines.push(`${style.gray}${'━'.repeat(66)}${style.reset}\n`);
+
+  lines.push(`  ${style.bold}PLAYLIST MENU:${style.reset}`);
+  lines.push(`  ${style.gray}${'─'.repeat(62)}${style.reset}`);
+
+  playlist.forEach((track, i) => {
+    const isHovered = i === selectedIndex;
+    const isPlaying = i === activePlayingIndex;
+
+    // Pointer symbol
+    const pointer = isHovered ? `${style.cyan}${style.bold}❯${style.reset}` : ' ';
+
+    // Playback badge
+    let badge = '           ';
+    if (isPlaying) {
+      badge = isPaused
+        ? `${style.yellow}⏸ [PAUSED] ${style.reset}`
+        : `${style.green}▶ [PLAYING]${style.reset}`;
+    }
+
+    const num = `${track.index}.`.padEnd(3);
+    const maxNameLen = 30;
+    const truncatedName = track.filename.length > maxNameLen
+      ? track.filename.substring(0, maxNameLen - 3) + '...'
+      : track.filename.padEnd(maxNameLen);
+
+    const size = track.size.padStart(9);
+    const fmt = track.ext.toUpperCase().replace('.', '').padEnd(4);
+
+    let rowText = '';
+    if (isHovered) {
+      rowText = `${pointer} ${style.cyan}${style.bold}${num}${style.reset} ${badge} ${style.bold}${style.cyan}${truncatedName}${style.reset} ${style.dim}${size}${style.reset}  ${style.magenta}${fmt}${style.reset}`;
+    } else if (isPlaying) {
+      rowText = `${pointer} ${num} ${badge} ${style.green}${style.bold}${truncatedName}${style.reset} ${style.dim}${size}${style.reset}  ${style.magenta}${fmt}${style.reset}`;
+    } else {
+      rowText = `${pointer} ${style.dim}${num}${style.reset} ${badge} ${truncatedName} ${style.dim}${size}${style.reset}  ${style.dim}${fmt}${style.reset}`;
+    }
+
+    lines.push(`  ${rowText}`);
+  });
+
+  lines.push(`  ${style.gray}${'─'.repeat(62)}${style.reset}\n`);
+
+  // Status message
+  if (statusText) {
+    lines.push(`  ${statusText}\n`);
+  }
+
+  // Footer keybindings guide
+  lines.push(`${style.gray}${'━'.repeat(66)}${style.reset}`);
+  lines.push(
+    ` ${style.bold}Controls:${style.reset} [${style.cyan}↑/k${style.reset}] Up  [${style.cyan}↓/j${style.reset}] Down  [${style.green}Enter${style.reset}] Play Track  [${style.red}q / Ctrl+C${style.reset}] Quit`
+  );
+  lines.push(`${style.gray}${'━'.repeat(66)}${style.reset}`);
+
+  // Flicker-free write: move cursor to top-left and redraw
+  process.stdout.write(`\x1b[?25l\x1b[H\x1b[J${lines.join('\n')}\n`);
+}
+
+/**
+ * Main entry point for interactive player execution.
  */
 async function main() {
   const cliTarget = process.argv[2] || './music';
   const { targetPath, isDirectory, playlist } = buildPlaylist(cliTarget);
 
-  printPlaylistSummary(targetPath, isDirectory, playlist);
+  // Application state
+  const state = {
+    targetPath,
+    isDirectory,
+    playlist,
+    selectedIndex: 0,
+    activePlayingIndex: -1,
+    isPaused: false,
+    statusText: `${style.dim}Use ↑/↓ or k/j to navigate, press Enter to play.${style.reset}`
+  };
 
-  // Initialize MPV IPC Audio Backend
   const player = new MPVAudioEngine();
-  console.log(`${style.dim}Initializing mpv audio backend...${style.reset}`);
-  
+
+  // Graceful shutdown handler
+  const shutdown = () => {
+    if (process.stdin.isTTY) {
+      try {
+        process.stdin.setRawMode(false);
+        process.stdin.pause();
+      } catch {}
+    }
+
+    // Restore cursor and print exit message
+    process.stdout.write('\x1b[?25h\n');
+    console.log(`${style.yellow}Playback stopped. Exiting Terminal Music Player...${style.reset}\n`);
+    player.cleanup();
+    process.exit(0);
+  };
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  process.on('exit', () => {
+    player.cleanup();
+    process.stdout.write('\x1b[?25h');
+  });
+
   try {
     await player.start();
-    console.log(`${style.green}✔ mpv IPC Engine initialized successfully.${style.reset}`);
-    
-    // Graceful exit handlers
-    const shutdown = () => {
-      console.log(`\n${style.yellow}Shutting down audio player...${style.reset}`);
-      player.cleanup();
-      process.exit(0);
-    };
-
-    process.on('SIGINT', shutdown);
-    process.on('SIGTERM', shutdown);
-    process.on('exit', () => player.cleanup());
-
-    // Play first track as a smoke test
-    let currentIndex = 0;
-    const initialTrack = playlist[currentIndex];
-    console.log(`${style.cyan}▶ Now Playing:${style.reset} ${style.bold}${initialTrack.filename}${style.reset}\n`);
-    player.loadFile(initialTrack.fullPath);
-
-    player.on('duration', (dur) => {
-      console.log(`${style.dim}[mpv event] Duration detected:${style.reset} ${dur.toFixed(2)}s`);
-    });
-
-    player.on('end-file', () => {
-      currentIndex = (currentIndex + 1) % playlist.length;
-      const nextTrack = playlist[currentIndex];
-      console.log(`\n${style.cyan}▶ Next Track:${style.reset} ${style.bold}${nextTrack.filename}${style.reset}`);
-      player.loadFile(nextTrack.fullPath);
-    });
-
   } catch (err) {
     console.error(`${style.red}${style.bold}Error starting audio engine:${style.reset}`, err.message);
-    player.cleanup();
-    process.exit(1);
+    shutdown();
   }
+
+  // Listen to MPV state events to update UI
+  player.on('pause', (paused) => {
+    state.isPaused = paused;
+    renderUI(state);
+  });
+
+  player.on('end-file', () => {
+    // Auto-advance to next track on song completion
+    if (state.activePlayingIndex >= 0) {
+      state.activePlayingIndex = (state.activePlayingIndex + 1) % playlist.length;
+      state.selectedIndex = state.activePlayingIndex;
+      const nextTrack = playlist[state.activePlayingIndex];
+      state.statusText = `${style.green}▶ Auto-playing next track:${style.reset} ${style.bold}${nextTrack.filename}${style.reset}`;
+      player.loadFile(nextTrack.fullPath);
+      renderUI(state);
+    }
+  });
+
+  // Enable raw keyboard mode for low-latency interactive input
+  readline.emitKeypressEvents(process.stdin);
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+  }
+
+  // Modular keypress listener
+  process.stdin.on('keypress', (str, key) => {
+    if (!key) return;
+
+    // Quit application
+    if ((key.ctrl && key.name === 'c') || key.name === 'q') {
+      shutdown();
+      return;
+    }
+
+    // Navigate Up
+    if (key.name === 'up' || str === 'k') {
+      state.selectedIndex = (state.selectedIndex - 1 + playlist.length) % playlist.length;
+      renderUI(state);
+      return;
+    }
+
+    // Navigate Down
+    if (key.name === 'down' || str === 'j') {
+      state.selectedIndex = (state.selectedIndex + 1) % playlist.length;
+      renderUI(state);
+      return;
+    }
+
+    // Play Selected Track (Enter / Return)
+    if (key.name === 'return' || key.name === 'enter') {
+      state.activePlayingIndex = state.selectedIndex;
+      const track = playlist[state.activePlayingIndex];
+      state.statusText = `${style.green}▶ Now playing:${style.reset} ${style.bold}${track.filename}${style.reset}`;
+      player.loadFile(track.fullPath);
+      renderUI(state);
+      return;
+    }
+  });
+
+  // Initial UI Render
+  renderUI(state);
 }
 
 main();
+
 
