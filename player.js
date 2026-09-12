@@ -498,7 +498,7 @@ function renderUI(state) {
   // Footer keybindings guide
   lines.push(`${style.gray}${'━'.repeat(66)}${style.reset}`);
   lines.push(
-    ` ${style.bold}Controls:${style.reset} [${style.cyan}↑/k${style.reset}] Up  [${style.cyan}↓/j${style.reset}] Down  [${style.green}Enter${style.reset}] Play Track  [${style.red}q / Ctrl+C${style.reset}] Quit`
+    ` ${style.bold}Controls:${style.reset} [${style.cyan}↑/k${style.reset}] Up  [${style.cyan}↓/j${style.reset}] Down  [${style.green}Space/Enter${style.reset}] Play/Pause  [${style.cyan}←/→${style.reset}] ±10s  [${style.red}q${style.reset}] Quit`
   );
   lines.push(`${style.gray}${'━'.repeat(66)}${style.reset}`);
 
@@ -521,7 +521,7 @@ async function main() {
     selectedIndex: 0,
     activePlayingIndex: -1,
     isPaused: false,
-    statusText: `${style.dim}Use ↑/↓ or k/j to navigate, press Enter to play.${style.reset}`
+    statusText: `${style.dim}Use ↑/↓ or k/j to navigate, Space/Enter to play.${style.reset}`
   };
 
   const player = new MPVAudioEngine();
@@ -605,12 +605,61 @@ async function main() {
       return;
     }
 
-    // Play Selected Track (Enter / Return)
+    // Play/Select Track (Enter)
     if (key.name === 'return' || key.name === 'enter') {
       state.activePlayingIndex = state.selectedIndex;
+      state.isPaused = false;
       const track = playlist[state.activePlayingIndex];
       state.statusText = `${style.green}▶ Now playing:${style.reset} ${style.bold}${track.filename}${style.reset}`;
       player.loadFile(track.fullPath);
+      renderUI(state);
+      return;
+    }
+
+    // Play / Pause Toggle (Spacebar)
+    if (key.name === 'space' || str === ' ') {
+      if (state.activePlayingIndex === -1) {
+        // If nothing is playing yet, play the currently hovered item
+        state.activePlayingIndex = state.selectedIndex;
+        state.isPaused = false;
+        const track = playlist[state.activePlayingIndex];
+        state.statusText = `${style.green}▶ Now playing:${style.reset} ${style.bold}${track.filename}${style.reset}`;
+        player.loadFile(track.fullPath);
+      } else {
+        // Toggle pause on the active track
+        player.togglePause();
+        state.isPaused = !state.isPaused;
+        const track = playlist[state.activePlayingIndex];
+        state.statusText = state.isPaused
+          ? `${style.yellow}⏸ Playback paused:${style.reset} ${style.dim}${track.filename}${style.reset}`
+          : `${style.green}▶ Playback resumed:${style.reset} ${style.bold}${track.filename}${style.reset}`;
+      }
+      renderUI(state);
+      return;
+    }
+
+    // Seek Forward 10s (Right Arrow or 'l')
+    if (key.name === 'right' || str === 'l') {
+      if (state.activePlayingIndex !== -1) {
+        player.seek(10, 'relative');
+        const track = playlist[state.activePlayingIndex];
+        state.statusText = `${style.cyan}⏩ Seeked +10s:${style.reset} ${style.bold}${track.filename}${style.reset}`;
+      } else {
+        state.statusText = `${style.yellow}⚠ No track is currently playing to seek.${style.reset}`;
+      }
+      renderUI(state);
+      return;
+    }
+
+    // Seek Backward 10s (Left Arrow or 'h')
+    if (key.name === 'left' || str === 'h') {
+      if (state.activePlayingIndex !== -1) {
+        player.seek(-10, 'relative');
+        const track = playlist[state.activePlayingIndex];
+        state.statusText = `${style.cyan}⏪ Seeked -10s:${style.reset} ${style.bold}${track.filename}${style.reset}`;
+      } else {
+        state.statusText = `${style.yellow}⚠ No track is currently playing to seek.${style.reset}`;
+      }
       renderUI(state);
       return;
     }
