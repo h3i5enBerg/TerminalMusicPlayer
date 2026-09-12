@@ -498,7 +498,7 @@ function renderUI(state) {
   // Footer keybindings guide
   lines.push(`${style.gray}${'━'.repeat(66)}${style.reset}`);
   lines.push(
-    ` ${style.bold}Controls:${style.reset} [${style.cyan}↑/k${style.reset}] Up  [${style.cyan}↓/j${style.reset}] Down  [${style.green}Space/Enter${style.reset}] Play/Pause  [${style.cyan}←/→${style.reset}] ±10s  [${style.red}q${style.reset}] Quit`
+    ` ${style.bold}Controls:${style.reset} [${style.cyan}↑/↓${style.reset}] Move  [${style.green}Space${style.reset}] Play/Pause  [${style.cyan}←/→${style.reset}] ±10s  [${style.magenta}n/p${style.reset}] Next/Prev  [${style.red}q${style.reset}] Quit`
   );
   lines.push(`${style.gray}${'━'.repeat(66)}${style.reset}`);
 
@@ -583,30 +583,30 @@ async function main() {
 
   // Modular keypress listener
   process.stdin.on('keypress', (str, key) => {
-    if (!key) return;
+    if (!key && !str) return;
 
     // Quit application
-    if ((key.ctrl && key.name === 'c') || key.name === 'q') {
+    if ((key && key.ctrl && key.name === 'c') || str === 'q' || str === 'Q') {
       shutdown();
       return;
     }
 
     // Navigate Up
-    if (key.name === 'up' || str === 'k') {
+    if ((key && key.name === 'up') || str === 'k') {
       state.selectedIndex = (state.selectedIndex - 1 + playlist.length) % playlist.length;
       renderUI(state);
       return;
     }
 
     // Navigate Down
-    if (key.name === 'down' || str === 'j') {
+    if ((key && key.name === 'down') || str === 'j') {
       state.selectedIndex = (state.selectedIndex + 1) % playlist.length;
       renderUI(state);
       return;
     }
 
     // Play/Select Track (Enter)
-    if (key.name === 'return' || key.name === 'enter') {
+    if (key && (key.name === 'return' || key.name === 'enter')) {
       state.activePlayingIndex = state.selectedIndex;
       state.isPaused = false;
       const track = playlist[state.activePlayingIndex];
@@ -617,7 +617,7 @@ async function main() {
     }
 
     // Play / Pause Toggle (Spacebar)
-    if (key.name === 'space' || str === ' ') {
+    if ((key && key.name === 'space') || str === ' ') {
       if (state.activePlayingIndex === -1) {
         // If nothing is playing yet, play the currently hovered item
         state.activePlayingIndex = state.selectedIndex;
@@ -638,8 +638,53 @@ async function main() {
       return;
     }
 
+    // Next Track ('n' / 'N')
+    if (str === 'n' || str === 'N') {
+      if (state.activePlayingIndex === -1) {
+        state.activePlayingIndex = state.selectedIndex;
+      } else {
+        state.activePlayingIndex = (state.activePlayingIndex + 1) % playlist.length;
+      }
+      state.selectedIndex = state.activePlayingIndex;
+      state.isPaused = false;
+      const track = playlist[state.activePlayingIndex];
+      state.statusText = `${style.green}⏭ Next track:${style.reset} ${style.bold}${track.filename}${style.reset}`;
+      player.loadFile(track.fullPath);
+      renderUI(state);
+      return;
+    }
+
+    // Previous Track ('p' / 'P')
+    if (str === 'p' || str === 'P') {
+      if (state.activePlayingIndex === -1) {
+        state.activePlayingIndex = state.selectedIndex;
+        state.isPaused = false;
+        const track = playlist[state.activePlayingIndex];
+        state.statusText = `${style.green}▶ Now playing:${style.reset} ${style.bold}${track.filename}${style.reset}`;
+        player.loadFile(track.fullPath);
+      } else {
+        const currentTime = player.state.timePos || 0;
+        if (currentTime > 3) {
+          // Smart restart: restart from 0s if already played > 3s
+          player.seek(0, 'absolute');
+          const track = playlist[state.activePlayingIndex];
+          state.statusText = `${style.cyan}⏮ Restarting track:${style.reset} ${style.bold}${track.filename}${style.reset}`;
+        } else {
+          // Switch to previous track in playlist with loop/wrap
+          state.activePlayingIndex = (state.activePlayingIndex - 1 + playlist.length) % playlist.length;
+          state.selectedIndex = state.activePlayingIndex;
+          state.isPaused = false;
+          const track = playlist[state.activePlayingIndex];
+          state.statusText = `${style.green}⏮ Previous track:${style.reset} ${style.bold}${track.filename}${style.reset}`;
+          player.loadFile(track.fullPath);
+        }
+      }
+      renderUI(state);
+      return;
+    }
+
     // Seek Forward 10s (Right Arrow or 'l')
-    if (key.name === 'right' || str === 'l') {
+    if ((key && key.name === 'right') || str === 'l') {
       if (state.activePlayingIndex !== -1) {
         player.seek(10, 'relative');
         const track = playlist[state.activePlayingIndex];
@@ -652,7 +697,7 @@ async function main() {
     }
 
     // Seek Backward 10s (Left Arrow or 'h')
-    if (key.name === 'left' || str === 'h') {
+    if ((key && key.name === 'left') || str === 'h') {
       if (state.activePlayingIndex !== -1) {
         player.seek(-10, 'relative');
         const track = playlist[state.activePlayingIndex];
